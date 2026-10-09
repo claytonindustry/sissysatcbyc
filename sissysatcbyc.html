@@ -1,0 +1,1509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sissys@CBYC</title>
+<meta name="theme-color" content="#b3122b">
+<!--
+  ============================================================================
+  Sissys@CBYC  —  Cabrillo Beach Yacht Club club app
+  Single-file app. No build step. Firebase Realtime Database + Auth.
+  ============================================================================
+
+  ROLES
+    web     Webmaster (hardcoded email, backup access, full control)
+    mgr     Club Manager  (events, registrations, groups, roster, CBYC banner)
+    chef    Chef          (menu, specials, hours, Sissy's banner, reads all)
+    member  Member        (view + register, must be on roster)
+    none    Verified but not on roster -> pending screen
+
+  DATA LAYOUT  (Realtime Database)
+    /staff                  { clubManagerEmail, chefEmail }
+    /profileFields/{fid}    { label, required, order }
+    /roster/{mid}           { name, active, emails:{encEmail:true}, fields:{fid:val} }
+    /rosterEmails/{encEmail}= mid                  (lookup index; '.' -> ',')
+    /groups/{gid}           { name, color, order }
+    /events/{eid}           { title, date:'YYYY-MM-DD', time, desc, capacity,
+                              groupId, keyDate, questions:{qid:{label,type,
+                              options,required,order}}, createdAt }
+    /regs/{eid}/{rid}       { uid, headcount, status, at }      (readable by all)
+    /regDetails/{eid}/{rid} { name, email, answers:{qid:val}, preorder, note }
+    /eventChat/{eid}/{mid}  { uid, name, text, at }             (mgr/chef/web only)
+    /menu/published         { sections:{sid:{name,order}},
+                              items:{iid:{name,price,desc,sectionId,
+                                           days:{0..6:true},order}},
+                              specials:{'YYYY-MM-DD':{title,sections,items}} }
+    /menu/draft             same shape; one draft covers weekly + specials
+    /hours                  { regular:{0..6:{closed,open,close}},
+                              exceptions:{'YYYY-MM-DD':{closed,open,close,note}} }
+    /eightySix/{date}/{iid} = true                 (resets by date on its own)
+    /banner/cbyc            { text, at, expires }
+    /banner/sissys          { text, at, expires }
+
+  STATUSES   pending | approved | waitlist | declined | cancelled
+  PREORDER   dummy status only — no payment, no outlink.
+
+  OUT OF SCOPE (by decision): boats, slips, cranes, dues, member tabs,
+  real payments, links to Landing Manager / RaceMaster.
+  ============================================================================
+-->
+<style>
+/* ===================== shared ===================== */
+*{box-sizing:border-box}
+html,body{margin:0;padding:0;height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#f4f4f6}
+.hide{display:none !important}
+button{font:inherit;cursor:pointer}
+input,select,textarea{font:inherit}
+
+/* ===================== auth / gate screens ===================== */
+.gate{min-height:100%;display:flex;align-items:center;justify-content:center;padding:24px;
+  background:linear-gradient(160deg,#8e0b1f 0%,#b3122b 45%,#7d0a1b 100%)}
+.gate-card{width:100%;max-width:400px;background:#fff;border-radius:18px;padding:28px;
+  box-shadow:0 18px 50px rgba(0,0,0,.35)}
+.gate-card h1{margin:0 0 2px;font-size:25px;letter-spacing:-.4px;color:#b3122b}
+.gate-card .sub{margin:0 0 20px;color:#6b6b74;font-size:13px}
+.gate-card label{display:block;font-size:12px;font-weight:600;color:#55555e;margin:12px 0 5px}
+.gate-card input{width:100%;padding:11px 12px;border:1px solid #d8d8df;border-radius:10px;background:#fbfbfd}
+.gate-card input:focus{outline:none;border-color:#b3122b;background:#fff}
+.btn-primary{width:100%;margin-top:18px;padding:12px;border:0;border-radius:10px;color:#fff;font-weight:600;
+  background:linear-gradient(180deg,#d4203c,#a60f26);box-shadow:0 2px 8px rgba(179,18,43,.35)}
+.btn-primary:active{transform:translateY(1px)}
+.btn-link{background:none;border:0;color:#b3122b;font-size:13px;padding:8px 0;text-decoration:underline}
+.gate-msg{margin-top:14px;font-size:13px;padding:10px 12px;border-radius:9px;line-height:1.45}
+.gate-msg.err{background:#fdecef;color:#9b0f23}
+.gate-msg.ok{background:#eef7ee;color:#1d6b2b}
+.gate-foot{margin-top:16px;text-align:center}
+
+/* ===================== member app (glossy red, modern) ===================== */
+#app-member{min-height:100%;background:#f4f4f6;padding-bottom:40px}
+.m-top{position:sticky;top:0;z-index:30;background:linear-gradient(180deg,#c3142f,#9c0f23);
+  color:#fff;padding:14px 16px calc(14px + env(safe-area-inset-bottom,0px));
+  box-shadow:0 2px 14px rgba(0,0,0,.18);display:flex;align-items:center;gap:12px}
+.m-top h1{margin:0;font-size:19px;font-weight:700;letter-spacing:-.3px;flex:1}
+.m-acct{background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.3);color:#fff;
+  border-radius:999px;padding:6px 12px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:7px}
+.m-acct .dot{width:7px;height:7px;border-radius:50%;background:#7cf09a}
+.banner{display:flex;gap:10px;align-items:flex-start;padding:11px 14px;background:#2b2b33;color:#fff;font-size:14px}
+.banner .tag{font-size:10px;font-weight:800;letter-spacing:.8px;background:#fff;color:#2b2b33;
+  border-radius:4px;padding:2px 6px;flex:none;margin-top:1px}
+.banner .x{margin-left:auto;background:none;border:0;color:#aaa;font-size:17px;line-height:1;padding:0 2px}
+.wrap{max-width:720px;margin:0 auto;padding:16px}
+.card{background:#fff;border-radius:16px;padding:16px;margin-bottom:16px;box-shadow:0 1px 3px rgba(16,16,24,.1)}
+.card h2{margin:0 0 12px;font-size:15px;font-weight:700;color:#1b1b22;letter-spacing:-.2px}
+.cal{width:100%;border-collapse:collapse;table-layout:fixed}
+.cal th{font-size:10px;color:#8a8a94;font-weight:700;padding-bottom:6px;text-transform:uppercase}
+.cal td{text-align:center;padding:2px;vertical-align:top}
+.cal .day{position:relative;aspect-ratio:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;border-radius:10px;font-size:14px;color:#2b2b33;border:0;background:none;width:100%}
+.cal .day.off{color:#c3c3cb}
+.cal .day.today{background:#fdecef;color:#b3122b;font-weight:800}
+.cal .day.has{cursor:pointer}
+.cal .dots{display:flex;gap:3px;height:6px;margin-top:3px}
+.cal .dots i{width:5px;height:5px;border-radius:50%;display:block}
+.cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.cal-head b{font-size:15px}
+.cal-head button{background:#f1f1f5;border:0;border-radius:8px;width:30px;height:30px;font-size:15px;color:#55555e}
+.ev{display:flex;gap:12px;padding:12px 0;border-top:1px solid #f0f0f4;cursor:pointer;align-items:flex-start}
+.ev:first-child{border-top:0}
+.ev .when{flex:none;width:52px;text-align:center}
+.ev .when .d{font-size:19px;font-weight:800;color:#1b1b22;line-height:1}
+.ev .when .mo{font-size:10px;text-transform:uppercase;color:#8a8a94;font-weight:700;letter-spacing:.5px}
+.ev .body{flex:1;min-width:0}
+.ev .body .t{font-weight:650;font-size:15px;color:#1b1b22}
+.ev .body .meta{font-size:12.5px;color:#76767f;margin-top:2px}
+.chip{display:inline-block;font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:999px;
+  color:#fff;letter-spacing:.3px;vertical-align:middle}
+.chip.key{background:#1b1b22}
+.chip.full{background:#8a8a94}
+.chip.reg{background:#1d8a3d}
+.chip.wait{background:#c9881a}
+.menu-sec{margin-top:12px}
+.menu-sec h3{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.7px;color:#b3122b;font-weight:800}
+.mi{display:flex;gap:10px;padding:5px 0;font-size:14px;align-items:baseline}
+.mi .n{flex:1}
+.mi .p{font-variant-numeric:tabular-nums;color:#55555e}
+.mi.off .n{text-decoration:line-through;color:#aaa}
+.mi .d{display:block;font-size:12px;color:#8a8a94;margin-top:1px}
+.hours{font-size:13px;color:#55555e;margin-bottom:4px}
+.pill-row{display:flex;gap:7px;overflow-x:auto;padding:2px 0 4px;-webkit-overflow-scrolling:touch}
+.pill{flex:none;background:#fdecef;color:#b3122b;border:0;border-radius:999px;padding:7px 12px;font-size:12.5px;font-weight:650}
+.sheet{position:fixed;inset:0;z-index:60;display:flex;align-items:flex-end;justify-content:center;
+  background:rgba(14,14,20,.5);backdrop-filter:blur(2px)}
+.sheet-in{background:#fff;width:100%;max-width:720px;max-height:92%;overflow:auto;
+  border-radius:20px 20px 0 0;padding:20px 18px calc(28px + env(safe-area-inset-bottom,0px))}
+.sheet-in h2{margin:0 0 4px;font-size:20px;letter-spacing:-.3px}
+.sheet-in .close{position:sticky;top:0;float:right;background:#f1f1f5;border:0;border-radius:50%;
+  width:30px;height:30px;font-size:16px;color:#55555e}
+.fld{margin:14px 0}
+.fld label{display:block;font-size:12.5px;font-weight:650;color:#45454e;margin-bottom:5px}
+.fld input[type=text],.fld input[type=number],.fld input[type=tel],.fld select,.fld textarea{
+  width:100%;padding:10px 11px;border:1px solid #dcdce3;border-radius:10px;background:#fbfbfd}
+.fld .opts label{display:flex;gap:8px;align-items:center;font-weight:400;font-size:14px;margin:6px 0}
+.note{font-size:12.5px;color:#76767f;line-height:1.5}
+.ok-box{background:#eef7ee;color:#1d6b2b;padding:11px 13px;border-radius:11px;font-size:13.5px}
+.warn-box{background:#fff6e6;color:#8a5a08;padding:11px 13px;border-radius:11px;font-size:13.5px}
+
+/* ===================== admin app (90s desktop) ===================== */
+#app-admin{min-height:100%;background:#008080;font-family:Tahoma,"MS Sans Serif",Geneva,sans-serif;font-size:12px}
+.d-bar{background:#c0c0c0;border-bottom:2px solid #868a8e;padding:3px 4px;display:flex;align-items:center;
+  gap:3px;position:sticky;top:0;z-index:40;flex-wrap:wrap}
+.d-bar .logo{font-weight:bold;padding:3px 9px;margin-right:4px;background:#000080;color:#fff}
+.tabbtn,.b95{background:#c0c0c0;border:2px outset #fff;border-right-color:#404040;border-bottom-color:#404040;
+  padding:3px 9px;color:#000;font-family:inherit;font-size:12px}
+.tabbtn:active,.b95:active{border-style:inset}
+.tabbtn.on{border-style:inset;background:#dfdfdf;font-weight:bold}
+.b95.sm{padding:1px 6px;font-size:11px}
+.d-bar .who{margin-left:auto;padding:3px 8px;border:2px inset #fff;background:#c0c0c0;white-space:nowrap}
+.desk{padding:10px;display:flex;flex-direction:column;gap:10px}
+.win{background:#c0c0c0;border:2px outset #fff;border-right-color:#404040;border-bottom-color:#404040;
+  box-shadow:2px 2px 0 rgba(0,0,0,.35)}
+.win>.tb{background:linear-gradient(90deg,#000080,#1084d0);color:#fff;font-weight:bold;padding:3px 5px;
+  display:flex;align-items:center;gap:6px}
+.win>.tb .sp{flex:1}
+.win>.tb button{background:#c0c0c0;border:2px outset #fff;border-right-color:#404040;border-bottom-color:#404040;
+  color:#000;width:18px;height:17px;line-height:1;font-size:11px;padding:0;font-weight:bold}
+.win>.bd{padding:9px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.f95{margin-bottom:7px}
+.f95 label{display:block;margin-bottom:2px}
+.f95 input[type=text],.f95 input[type=number],.f95 input[type=date],.f95 input[type=time],
+.f95 input[type=email],.f95 select,.f95 textarea{
+  border:2px inset #fff;background:#fff;padding:2px 4px;font-family:inherit;font-size:12px;width:100%}
+.f95.inline{display:flex;gap:6px;align-items:center}
+.f95.inline label{margin:0;white-space:nowrap}
+fieldset{border:2px groove #fff;margin:0 0 8px;padding:7px}
+legend{padding:0 4px;font-weight:bold}
+table.sheet95{border-collapse:collapse;width:100%;background:#fff;font-size:11.5px}
+table.sheet95 th{background:#c0c0c0;border:1px solid #868a8e;padding:3px 5px;text-align:left;white-space:nowrap;
+  position:sticky;top:0}
+table.sheet95 td{border:1px solid #d4d0c8;padding:0}
+table.sheet95 td input,table.sheet95 td select{width:100%;border:0;background:transparent;padding:3px 5px;
+  font-family:inherit;font-size:11.5px}
+table.sheet95 td input:focus,table.sheet95 td select:focus{background:#fffbd0;outline:1px solid #000080}
+.scrollx{overflow-x:auto;border:2px inset #fff;background:#fff;max-height:62vh;overflow-y:auto}
+.cal95{border-collapse:collapse;width:100%;background:#fff;table-layout:fixed}
+.cal95 th{background:#c0c0c0;border:1px solid #868a8e;padding:2px;font-size:11px}
+.cal95 td{border:1px solid #d4d0c8;height:62px;vertical-align:top;padding:1px;cursor:pointer}
+.cal95 td.off{background:#e8e8e8;color:#999}
+.cal95 td.today{background:#ffffe0}
+.cal95 .dn{font-size:11px;font-weight:bold;padding:1px 2px}
+.cal95 .evb{font-size:10px;padding:1px 2px;margin:1px 0;color:#fff;overflow:hidden;white-space:nowrap;
+  text-overflow:ellipsis;border:1px solid rgba(0,0,0,.3)}
+.status-bar{border:2px inset #fff;padding:2px 5px;background:#c0c0c0;margin-top:7px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:70;display:flex;align-items:flex-start;
+  justify-content:center;padding:14px;overflow:auto}
+.modal .win{width:100%;max-width:760px;margin:auto}
+.chatbox{border:2px inset #fff;background:#fff;height:160px;overflow:auto;padding:5px;font-size:11.5px}
+.chatbox .m{margin-bottom:5px}
+.chatbox .m b{color:#000080}
+.chatbox .m i{color:#666;font-style:normal;font-size:10px}
+.swatch{width:16px;height:16px;border:1px solid #404040;display:inline-block;vertical-align:middle}
+.daybox{display:flex;gap:4px;flex-wrap:wrap}
+.daybox label{border:2px outset #fff;border-right-color:#404040;border-bottom-color:#404040;
+  padding:1px 5px;background:#c0c0c0;cursor:pointer;font-size:11px}
+.daybox label.on{border-style:inset;background:#dfdfdf;font-weight:bold}
+.daybox input{display:none}
+.hint{font-size:11px;color:#404040}
+.dirty{background:#ffffc0;border:2px inset #fff;padding:4px 7px;margin-bottom:8px;font-weight:bold}
+@media(max-width:600px){.desk{padding:5px}.win>.bd{padding:7px}}
+</style>
+</head>
+<body>
+
+<!-- ============ AUTH ============ -->
+<div id="screen-auth" class="gate hide">
+  <div class="gate-card">
+    <h1>Sissys@CBYC</h1>
+    <p class="sub">Cabrillo Beach Yacht Club</p>
+    <div id="auth-form">
+      <label for="a-email">Email</label>
+      <input id="a-email" type="email" autocomplete="email" autocapitalize="off">
+      <label for="a-pass">Password</label>
+      <input id="a-pass" type="password" autocomplete="current-password">
+      <div id="a-name-wrap" class="hide">
+        <label for="a-name">Your name</label>
+        <input id="a-name" type="text" autocomplete="name">
+      </div>
+      <button id="a-go" class="btn-primary">Sign in</button>
+      <div id="a-msg"></div>
+      <div class="gate-foot">
+        <button id="a-toggle" class="btn-link">Create an account</button><br>
+        <button id="a-reset" class="btn-link">Forgot password</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ VERIFY ============ -->
+<div id="screen-verify" class="gate hide">
+  <div class="gate-card">
+    <h1>Check your email</h1>
+    <p class="sub">We sent a verification link to <b id="v-email"></b>. Open it, then come back.</p>
+    <div class="gate-msg ok">Verification mail often lands in spam or promotions. Look there if it hasn't arrived.</div>
+    <button id="v-check" class="btn-primary">I've verified — continue</button>
+    <div id="v-msg"></div>
+    <div class="gate-foot">
+      <button id="v-resend" class="btn-link">Resend the email</button><br>
+      <button class="btn-link signout">Sign out</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ PENDING ============ -->
+<div id="screen-pending" class="gate hide">
+  <div class="gate-card">
+    <h1>Almost there</h1>
+    <p class="sub">Your email is verified, but <b id="p-email"></b> isn't on the club roster yet.</p>
+    <div class="gate-msg err">Ask the Club Manager to add this address to the roster, then sign in again.</div>
+    <button id="p-recheck" class="btn-primary">Check again</button>
+    <div class="gate-foot"><button class="btn-link signout">Sign out</button></div>
+  </div>
+</div>
+
+<!-- ============ MEMBER ============ -->
+<div id="app-member" class="hide">
+  <div class="m-top">
+    <h1>Sissys@CBYC</h1>
+    <button class="m-acct" id="m-acct"><span class="dot"></span><span id="m-badge">—</span></button>
+  </div>
+  <div id="m-banner"></div>
+  <div class="wrap">
+    <div class="card">
+      <div class="cal-head">
+        <button id="m-prev">‹</button><b id="m-month"></b><button id="m-next">›</button>
+      </div>
+      <div id="m-cal"></div>
+    </div>
+    <div class="card">
+      <h2>Upcoming events</h2>
+      <div id="m-upcoming"></div>
+    </div>
+    <div class="card" id="m-sissys">
+      <h2>Sissy's — today</h2>
+      <div id="m-menu"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ ADMIN ============ -->
+<div id="app-admin" class="hide">
+  <div class="d-bar">
+    <span class="logo">Sissys@CBYC</span>
+    <span id="ad-tabs"></span>
+    <span class="who"><span id="ad-who"></span> &nbsp;<button class="b95 sm signout">Sign out</button></span>
+  </div>
+  <div class="desk" id="ad-desk"></div>
+</div>
+
+<div id="modal-host"></div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification,
+         signOut, onAuthStateChanged, sendPasswordResetEmail, reload }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getDatabase, ref, onValue, set, update, push, remove, get }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCUtFP3-CMiyBjB-_YUr6I71Nf_--fm3yY",
+  authDomain: "sissysatcbyc.firebaseapp.com",
+  databaseURL: "https://sissysatcbyc-default-rtdb.firebaseio.com",
+  projectId: "sissysatcbyc",
+  storageBucket: "sissysatcbyc.firebasestorage.app",
+  messagingSenderId: "372202679517",
+  appId: "1:372202679517:web:280be6c5d509bd4f8e3f34",
+  measurementId: "G-C39W3GDK89"
+};
+const app  = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getDatabase(app);
+
+const WEBMASTER = "colinjamesclayton@gmail.com";
+const DAYS  = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const MONTHS= ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const PALETTE = ["#b3122b","#1d6b2b","#1b4f9c","#8a5a08","#6b2d8f","#0f7c86","#9c3f12","#444a52"];
+
+/* ---------- helpers ---------- */
+const $  = s => document.querySelector(s);
+const esc= s => String(s==null?"":s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const encEmail = e => String(e||"").toLowerCase().trim().replace(/\./g,",");
+const todayStr = () => ymd(new Date());
+function ymd(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
+function parseYmd(s){ const [y,m,d]=String(s||"").split("-").map(Number); return new Date(y,(m||1)-1,d||1); }
+function fmtDate(s){ const d=parseYmd(s); return DAYS[d.getDay()]+" "+MONTHS[d.getMonth()].slice(0,3)+" "+d.getDate(); }
+function fmtTime(t){ if(!t) return ""; const [h,m]=t.split(":").map(Number); const ap=h>=12?"PM":"AM";
+  return ((h%12)||12)+(m?":"+String(m).padStart(2,"0"):"")+" "+ap; }
+function money(v){ const n=parseFloat(v); return isNaN(n)?"":"$"+n.toFixed(2); }
+function obj2arr(o){ return Object.entries(o||{}).map(([id,v])=>({id,...v})); }
+function byOrder(a,b){ return (a.order??0)-(b.order??0); }
+function show(id){ ["screen-auth","screen-verify","screen-pending","app-member","app-admin"]
+  .forEach(x=>$("#"+x).classList.toggle("hide", x!==id)); }
+
+/* ---------- state ---------- */
+const S = {
+  user:null, role:"none", memberId:null, me:null,
+  staff:{}, groups:{}, events:{}, roster:{}, profileFields:{},
+  menu:{}, draft:{}, hours:{}, six:{}, banner:{},
+  regs:{}, calMonth:new Date(), filters:null, bannerDismissed:false,
+  tab:null, openEvent:null
+};
+
+/* =========================================================
+   AUTH
+   ========================================================= */
+let signUpMode = false;
+$("#a-toggle").onclick = () => {
+  signUpMode = !signUpMode;
+  $("#a-go").textContent   = signUpMode ? "Create account" : "Sign in";
+  $("#a-toggle").textContent = signUpMode ? "I already have an account" : "Create an account";
+  $("#a-name-wrap").classList.toggle("hide", !signUpMode);
+  $("#a-pass").autocomplete = signUpMode ? "new-password" : "current-password";
+  msg("#a-msg","");
+};
+function msg(sel,text,kind){ const e=$(sel);
+  e.innerHTML = text ? `<div class="gate-msg ${kind||"err"}">${esc(text)}</div>` : ""; }
+function authErr(e){
+  const m={"auth/invalid-credential":"That email and password don't match.",
+    "auth/invalid-email":"That doesn't look like an email address.",
+    "auth/email-already-in-use":"An account already exists for that email. Try signing in.",
+    "auth/weak-password":"Pick a password of at least 6 characters.",
+    "auth/too-many-requests":"Too many attempts. Wait a minute and try again.",
+    "auth/network-request-failed":"No connection to the server."};
+  return m[e.code] || e.message;
+}
+$("#a-go").onclick = async () => {
+  const email=$("#a-email").value.trim(), pass=$("#a-pass").value;
+  if(!email||!pass) return msg("#a-msg","Enter your email and password.");
+  $("#a-go").disabled = true;
+  try{
+    if(signUpMode){
+      const name=$("#a-name").value.trim();
+      if(!name){ $("#a-go").disabled=false; return msg("#a-msg","Please enter your name."); }
+      const cred = await createUserWithEmailAndPassword(auth,email,pass);
+      sessionStorage.setItem("pendingName", name);
+      await sendEmailVerification(cred.user);
+    } else {
+      await signInWithEmailAndPassword(auth,email,pass);
+    }
+  }catch(e){ msg("#a-msg",authErr(e)); }
+  $("#a-go").disabled = false;
+};
+$("#a-reset").onclick = async () => {
+  const email=$("#a-email").value.trim();
+  if(!email) return msg("#a-msg","Enter your email first, then tap this again.");
+  try{ await sendEmailResetSafe(email); msg("#a-msg","Password reset email sent.","ok"); }
+  catch(e){ msg("#a-msg",authErr(e)); }
+};
+async function sendEmailResetSafe(email){ return sendPasswordResetEmail(auth,email); }
+$("#v-resend").onclick = async () => {
+  try{ await sendEmailVerification(auth.currentUser); msg("#v-msg","Sent again.","ok"); }
+  catch(e){ msg("#v-msg",authErr(e)); }
+};
+$("#v-check").onclick = async () => {
+  await reload(auth.currentUser);
+  if(auth.currentUser.emailVerified) boot(); else msg("#v-msg","Not verified yet. Open the link in the email first.");
+};
+$("#p-recheck").onclick = () => boot();
+document.querySelectorAll(".signout").forEach(b=>b.onclick=()=>signOut(auth));
+
+onAuthStateChanged(auth, async u => {
+  S.user = u;
+  if(!u){ show("screen-auth"); return; }
+  boot();
+});
+
+async function boot(){
+  const u = auth.currentUser; if(!u) return;
+  if(!u.emailVerified){ $("#v-email").textContent = u.email; show("screen-verify"); return; }
+  const email = (u.email||"").toLowerCase();
+
+  // resolve role
+  let role="none", memberId=null;
+  if(email === WEBMASTER){ role="web"; }
+  else {
+    try{
+      const st = (await get(ref(db,"staff"))).val() || {};
+      S.staff = st;
+      if(email === String(st.clubManagerEmail||"").toLowerCase())      role="mgr";
+      else if(email === String(st.chefEmail||"").toLowerCase())        role="chef";
+    }catch(e){ /* rules may block before roster; fall through */ }
+  }
+  if(role==="none"){
+    try{
+      const mid = (await get(ref(db,"rosterEmails/"+encEmail(email)))).val();
+      if(mid){ role="member"; memberId=mid; }
+    }catch(e){}
+  }
+  S.role=role; S.memberId=memberId;
+
+  if(role==="none"){ $("#p-email").textContent = u.email; show("screen-pending"); return; }
+
+  // first-time roster name fill
+  const pending = sessionStorage.getItem("pendingName");
+  if(pending && memberId){
+    try{ const cur=(await get(ref(db,`roster/${memberId}/name`))).val();
+         if(!cur) await set(ref(db,`roster/${memberId}/name`), pending); }catch(e){}
+    sessionStorage.removeItem("pendingName");
+  }
+
+  subscribe();
+  if(role==="member"){ S.filters=null; show("app-member"); }
+  else { show("app-admin"); setupAdmin(); }
+}
+
+/* =========================================================
+   SUBSCRIPTIONS
+   ========================================================= */
+let subscribed=false;
+function subscribe(){
+  if(subscribed) return; subscribed=true;
+  const w = (path, key, after) => onValue(ref(db,path), snap => { S[key]=snap.val()||{}; (after||render)(); }, ()=>{});
+  w("groups","groups"); w("events","events"); w("menu/published","menu");
+  w("hours","hours"); w("banner","banner"); w("eightySix","six");
+  w("regs","regs"); w("profileFields","profileFields");
+  if(S.role==="member" && S.memberId) w("roster/"+S.memberId,"me");
+  if(S.role!=="member"){ w("roster","roster"); w("menu/draft","draft"); w("staff","staff"); }
+}
+
+function render(){ if(S.role==="member") renderMember(); else renderAdmin(); }
+
+/* =========================================================
+   BANNER (shared)
+   ========================================================= */
+function activeBanner(){
+  const now=Date.now(); const out=[];
+  for(const k of ["cbyc","sissys"]){
+    const b=S.banner?.[k];
+    if(b && b.text && (!b.expires || b.expires>now)) out.push({key:k,...b});
+  }
+  out.sort((a,b)=>(b.at||0)-(a.at||0));
+  return out[0]||null;
+}
+function renderBannerInto(sel){
+  const host=$(sel); const b=activeBanner();
+  if(!b || S.bannerDismissed){ host.innerHTML=""; return; }
+  host.innerHTML = `<div class="banner"><span class="tag">${b.key==="cbyc"?"CBYC":"SISSY'S"}</span>
+    <span>${esc(b.text)}</span><button class="x" title="Dismiss">×</button></div>`;
+  host.querySelector(".x").onclick=()=>{ S.bannerDismissed=true; host.innerHTML=""; };
+}
+
+/* =========================================================
+   EVENT / REGISTRATION HELPERS
+   ========================================================= */
+function eventList(){ return obj2arr(S.events).sort((a,b)=>(a.date+(a.time||"")).localeCompare(b.date+(b.time||""))); }
+function regsFor(eid){ return obj2arr(S.regs?.[eid]||{}); }
+function counts(eid){
+  const r=regsFor(eid); const c={approved:0,pending:0,waitlist:0,declined:0,cancelled:0,heads:0};
+  r.forEach(x=>{ c[x.status]=(c[x.status]||0)+1; if(x.status==="approved"||x.status==="pending") c.heads+=Number(x.headcount||1); });
+  return c;
+}
+function isFull(ev){ const cap=Number(ev.capacity||0); if(!cap) return false; return counts(ev.id).heads>=cap; }
+function myReg(eid){ return regsFor(eid).find(r=>r.uid===S.user?.uid && r.status!=="cancelled") || null; }
+function groupOf(id){ return S.groups?.[id] || null; }
+function isPast(ev){ return ev.date < todayStr(); }
+
+/* =========================================================
+   MEMBER VIEW
+   ========================================================= */
+function renderMember(){
+  $("#m-badge").textContent = S.me?.name || S.user?.email || "Member";
+  renderBannerInto("#m-banner");
+  renderMemberCal();
+  renderUpcoming();
+  renderTodayMenu();
+}
+function visibleEvents(){
+  let list = eventList();
+  if(S.filters && S.filters.size) list = list.filter(e=> S.filters.has(e.groupId||"none"));
+  return list;
+}
+$("#m-prev").onclick=()=>{ S.calMonth.setMonth(S.calMonth.getMonth()-1); renderMemberCal(); };
+$("#m-next").onclick=()=>{ S.calMonth.setMonth(S.calMonth.getMonth()+1); renderMemberCal(); };
+
+function renderMemberCal(){
+  const base=S.calMonth, y=base.getFullYear(), m=base.getMonth();
+  $("#m-month").textContent = MONTHS[m]+" "+y;
+  const first=new Date(y,m,1), start=new Date(y,m,1-first.getDay());
+  const evs=visibleEvents(); const byDate={};
+  evs.forEach(e=>{ (byDate[e.date]=byDate[e.date]||[]).push(e); });
+  const specials=S.menu?.specials||{};
+  let html='<table class="cal"><thead><tr>'+DAYS.map(d=>`<th>${d[0]}</th>`).join("")+'</tr></thead><tbody>';
+  const cur=new Date(start);
+  for(let w=0;w<6;w++){
+    html+="<tr>";
+    for(let i=0;i<7;i++){
+      const ds=ymd(cur), off=cur.getMonth()!==m, isT=ds===todayStr();
+      const list=byDate[ds]||[];
+      const dots=list.slice(0,3).map(e=>`<i style="background:${esc(groupOf(e.groupId)?.color||"#8a8a94")}"></i>`).join("")
+                + (specials[ds]?'<i style="background:#b3122b"></i>':'');
+      html+=`<td><button class="day ${off?"off":""} ${isT?"today":""} ${list.length?"has":""}" data-d="${ds}">
+        <span>${cur.getDate()}</span><span class="dots">${dots}</span></button></td>`;
+      cur.setDate(cur.getDate()+1);
+    }
+    html+="</tr>";
+    if(cur.getMonth()!==m && w>=4) break;
+  }
+  html+="</tbody></table>";
+  $("#m-cal").innerHTML=html;
+  $("#m-cal").querySelectorAll(".day").forEach(b=>b.onclick=()=>{
+    const ds=b.dataset.d, list=byDate[ds]||[];
+    if(list.length===1) openEventSheet(list[0].id);
+    else if(list.length>1) openDaySheet(ds,list);
+    else if(specials[ds]) openMenuSheet(ds);
+  });
+}
+function renderUpcoming(){
+  const t=todayStr();
+  const list=visibleEvents().filter(e=>e.date>=t).slice(0,12);
+  if(!list.length){ $("#m-upcoming").innerHTML='<p class="note">Nothing on the calendar yet.</p>'; return; }
+  $("#m-upcoming").innerHTML=list.map(e=>{
+    const d=parseYmd(e.date), g=groupOf(e.groupId), r=myReg(e.id);
+    const chips=[
+      e.keyDate?'<span class="chip key">KEY DATE</span>':"",
+      g?`<span class="chip" style="background:${esc(g.color||"#8a8a94")}">${esc(g.name)}</span>`:"",
+      r?(r.status==="waitlist"?'<span class="chip wait">WAITLIST</span>':'<span class="chip reg">REGISTERED</span>')
+       :(isFull(e)?'<span class="chip full">FULL</span>':"")
+    ].filter(Boolean).join(" ");
+    return `<div class="ev" data-e="${e.id}">
+      <div class="when"><div class="d">${d.getDate()}</div><div class="mo">${MONTHS[d.getMonth()].slice(0,3)}</div></div>
+      <div class="body"><div class="t">${esc(e.title)}</div>
+        <div class="meta">${esc(fmtTime(e.time))}${e.time?" · ":""}${chips}</div></div></div>`;
+  }).join("");
+  $("#m-upcoming").querySelectorAll(".ev").forEach(x=>x.onclick=()=>openEventSheet(x.dataset.e));
+}
+function dayMenu(ds){
+  const sp=S.menu?.specials?.[ds];
+  if(sp) return {special:true, title:sp.title||"Special menu", sections:sp.sections||{}, items:sp.items||{}};
+  const dow=parseYmd(ds).getDay();
+  const items={}; Object.entries(S.menu?.items||{}).forEach(([id,it])=>{ if(it.days&&it.days[dow]) items[id]=it; });
+  return {special:false, title:"", sections:S.menu?.sections||{}, items};
+}
+function hoursFor(ds){
+  const ex=S.hours?.exceptions?.[ds];
+  if(ex) return ex;
+  return S.hours?.regular?.[parseYmd(ds).getDay()] || null;
+}
+function menuHtml(ds){
+  const m=dayMenu(ds), six=S.six?.[ds]||{};
+  const secs=obj2arr(m.sections).sort(byOrder);
+  const items=obj2arr(m.items).sort(byOrder);
+  const h=hoursFor(ds);
+  let out="";
+  out += `<div class="hours">${h ? (h.closed?"<b>Closed today</b>":"Open "+esc(h.open||"")+" – "+esc(h.close||"")) + (h.note?" · "+esc(h.note):"") : "Hours not posted"}</div>`;
+  if(m.special) out += `<div class="ok-box" style="margin:8px 0">${esc(m.title)}</div>`;
+  if(!items.length){ out += '<p class="note">No menu posted for today.</p>'; return out; }
+  const unsec = items.filter(i=>!i.sectionId || !m.sections[i.sectionId]);
+  const blocks = secs.map(s=>({s,list:items.filter(i=>i.sectionId===s.id)})).filter(b=>b.list.length);
+  if(unsec.length) blocks.push({s:{name:"Menu"},list:unsec});
+  out += blocks.map(b=>`<div class="menu-sec"><h3>${esc(b.s.name)}</h3>`+
+    b.list.map(i=>`<div class="mi ${six[i.id]?"off":""}"><span class="n">${esc(i.name)}${six[i.id]?" — sold out":""}
+      ${i.desc?`<span class="d">${esc(i.desc)}</span>`:""}</span><span class="p">${esc(money(i.price))}</span></div>`).join("")
+    +`</div>`).join("");
+  return out;
+}
+function renderTodayMenu(){
+  const t=todayStr();
+  const upcoming=Object.keys(S.menu?.specials||{}).filter(d=>d>=t).sort().slice(0,8);
+  let strip="";
+  if(upcoming.length){
+    strip = `<div style="margin-top:14px"><h2 style="margin-bottom:8px">Upcoming specials</h2><div class="pill-row">`+
+      upcoming.map(d=>`<button class="pill" data-d="${d}">${esc(fmtDate(d))} · ${esc(S.menu.specials[d].title||"Special")}</button>`).join("")+
+      `</div></div>`;
+  }
+  $("#m-menu").innerHTML = menuHtml(t) + strip +
+    `<p class="note" style="margin-top:12px">Sissy's is an independent business operating at CBYC. Pay Sissy's directly.</p>`;
+  $("#m-menu").querySelectorAll(".pill").forEach(b=>b.onclick=()=>openMenuSheet(b.dataset.d));
+}
+
+/* ---------- member sheets ---------- */
+function sheet(html){
+  const host=document.createElement("div"); host.className="sheet";
+  host.innerHTML=`<div class="sheet-in"><button class="close">×</button>${html}</div>`;
+  host.onclick=e=>{ if(e.target===host) host.remove(); };
+  host.querySelector(".close").onclick=()=>host.remove();
+  document.body.appendChild(host); return host;
+}
+function openDaySheet(ds,list){
+  const h=sheet(`<h2>${esc(fmtDate(ds))}</h2><div id="dl"></div>`);
+  h.querySelector("#dl").innerHTML=list.map(e=>`<div class="ev" data-e="${e.id}"><div class="body">
+    <div class="t">${esc(e.title)}</div><div class="meta">${esc(fmtTime(e.time))}</div></div></div>`).join("");
+  h.querySelectorAll(".ev").forEach(x=>x.onclick=()=>{ h.remove(); openEventSheet(x.dataset.e); });
+}
+function openMenuSheet(ds){
+  sheet(`<h2>Sissy's</h2><p class="note">${esc(fmtDate(ds))}</p>${menuHtml(ds)}`);
+}
+function openEventSheet(eid){
+  const ev=S.events?.[eid]; if(!ev) return;
+  const e={id:eid,...ev}, g=groupOf(e.groupId), r=myReg(eid), full=isFull(e), past=isPast(e);
+  const sp=S.menu?.specials?.[e.date];
+  const qs=obj2arr(e.questions).sort(byOrder);
+  let body=`<h2>${esc(e.title)}</h2>
+    <p class="note">${esc(fmtDate(e.date))}${e.time?" · "+esc(fmtTime(e.time)):""}
+      ${g?` · <span class="chip" style="background:${esc(g.color||"#8a8a94")}">${esc(g.name)}</span>`:""}</p>`;
+  if(e.desc) body+=`<p style="font-size:14.5px;line-height:1.5">${esc(e.desc).replace(/\n/g,"<br>")}</p>`;
+  if(e.capacity) body+=`<p class="note">Capacity ${esc(e.capacity)} · ${counts(eid).heads} spoken for</p>`;
+  if(sp) body+=`<div class="ok-box" style="margin:12px 0"><b>Sissy's special menu:</b> ${esc(sp.title||"Special menu")}
+      <button class="btn-link" id="see-menu" style="display:block">See the menu</button></div>`;
+
+  if(past){ body+=`<div class="warn-box">This event has passed.</div>`; }
+  else if(r){
+    body+=`<div class="${r.status==="waitlist"?"warn-box":"ok-box"}" style="margin-top:12px">
+      You're ${r.status==="waitlist"?"on the waitlist":r.status==="pending"?"registered — awaiting approval":
+      r.status==="declined"?"not registered (declined)":"confirmed"} for ${esc(r.headcount||1)}.
+      ${r.preorder?"<br>Food pre-order: <b>requested (unpaid)</b>":""}</div>
+      <button class="btn-primary" id="cancel-reg" style="background:#55555e;box-shadow:none">Cancel my registration</button>
+      <p class="note" style="margin-top:8px">Registrations can't be edited once submitted. Cancel and register again, or ask the Club Manager.</p>`;
+  } else {
+    body+=`<form id="regform">
+      <div class="fld"><label>Number in your party</label><input type="number" name="__head" min="1" value="1" required></div>`;
+    qs.forEach(q=>{
+      const req=q.required?"required":"";
+      if(q.type==="yesno") body+=`<div class="fld"><label>${esc(q.label)}${q.required?" *":""}</label>
+        <select name="q_${q.id}" ${req}><option value="">—</option><option>Yes</option><option>No</option></select></div>`;
+      else if(q.type==="number") body+=`<div class="fld"><label>${esc(q.label)}${q.required?" *":""}</label>
+        <input type="number" name="q_${q.id}" ${req}></div>`;
+      else if(q.type==="choice") body+=`<div class="fld"><label>${esc(q.label)}${q.required?" *":""}</label>
+        <select name="q_${q.id}" ${req}><option value="">—</option>${String(q.options||"").split(",")
+          .map(o=>o.trim()).filter(Boolean).map(o=>`<option>${esc(o)}</option>`).join("")}</select></div>`;
+      else if(q.type==="checklist") body+=`<div class="fld"><label>${esc(q.label)}</label><div class="opts">${
+        String(q.options||"").split(",").map(o=>o.trim()).filter(Boolean)
+        .map(o=>`<label><input type="checkbox" name="c_${q.id}" value="${esc(o)}"> ${esc(o)}</label>`).join("")}</div></div>`;
+      else body+=`<div class="fld"><label>${esc(q.label)}${q.required?" *":""}</label>
+        <input type="text" name="q_${q.id}" ${req}></div>`;
+    });
+    if(sp) body+=`<div class="fld"><label><input type="checkbox" name="__pre"> Pre-order food from Sissy's</label>
+      <p class="note">This records your intent only. No payment is taken here and nothing is charged to any club account — settle with Sissy's directly.</p></div>`;
+    body+=`<button class="btn-primary" type="submit">${full?"Join the waitlist":"Register"}</button>`;
+    if(full) body+=`<p class="note" style="margin-top:8px">This event is full. You'll be added to the waitlist in the order received.</p>`;
+    body+=`</form>`;
+  }
+  const h=sheet(body);
+  h.querySelector("#see-menu")?.addEventListener("click",()=>openMenuSheet(e.date));
+  h.querySelector("#cancel-reg")?.addEventListener("click", async ()=>{
+    if(!confirm("Cancel your registration for this event?")) return;
+    await update(ref(db,`regs/${eid}/${r.id}`),{status:"cancelled"});
+    h.remove();
+  });
+  h.querySelector("#regform")?.addEventListener("submit", async ev2=>{
+    ev2.preventDefault();
+    const fd=new FormData(ev2.target);
+    const head=Number(fd.get("__head")||1);
+    const answers={};
+    qs.forEach(q=>{
+      if(q.type==="checklist"){ const v=fd.getAll("c_"+q.id); if(v.length) answers[q.id]=v.join(", "); }
+      else { const v=fd.get("q_"+q.id); if(v!=null && v!=="") answers[q.id]=String(v); }
+    });
+    const status = isFull(e) ? "waitlist" : "pending";
+    const rid = push(ref(db,`regs/${eid}`)).key;
+    await set(ref(db,`regs/${eid}/${rid}`), {uid:S.user.uid, headcount:head, status, at:Date.now()});
+    await set(ref(db,`regDetails/${eid}/${rid}`), {
+      name:S.me?.name||S.user.email, email:S.user.email, answers,
+      preorder: fd.get("__pre") ? "requested" : "", note:""});
+    h.remove();
+  });
+}
+
+/* ---------- member account ---------- */
+$("#m-acct").onclick = () => {
+  const fields=obj2arr(S.profileFields).sort(byOrder);
+  const h=sheet(`<h2>${esc(S.me?.name||"Account")}</h2>
+    <p class="note">${esc(S.user?.email||"")}</p>
+    <div style="display:flex;gap:8px;margin:16px 0">
+      <button class="btn-primary" id="t-acct" style="margin:0">ACCOUNT</button>
+      <button class="btn-primary" id="t-set" style="margin:0;background:#55555e;box-shadow:none">SETTINGS</button>
+    </div><div id="acct-body"></div>`);
+  const body=h.querySelector("#acct-body");
+  const drawAcct=()=>{
+    body.innerHTML=`<form id="pf">
+      <div class="fld"><label>Name</label><input type="text" name="name" value="${esc(S.me?.name||"")}" required></div>
+      ${fields.map(f=>`<div class="fld"><label>${esc(f.label)}${f.required?" *":""}</label>
+        <input type="text" name="f_${f.id}" value="${esc(S.me?.fields?.[f.id]||"")}" ${f.required?"required":""}></div>`).join("")}
+      <p class="note">Other emails on file: ${esc(Object.keys(S.me?.emails||{}).map(e=>e.replace(/,/g,".")).join(", ")||"—")}.
+        The Club Manager maintains the roster.</p>
+      <button class="btn-primary" type="submit">Save</button>
+      <button class="btn-primary" type="button" id="so" style="background:#55555e;box-shadow:none">Sign out</button></form>`;
+    body.querySelector("#so").onclick=()=>signOut(auth);
+    body.querySelector("#pf").onsubmit=async ev=>{
+      ev.preventDefault(); const fd=new FormData(ev.target); const f={};
+      fields.forEach(x=>{ const v=fd.get("f_"+x.id); if(v) f[x.id]=String(v); });
+      await update(ref(db,`roster/${S.memberId}`),{name:String(fd.get("name")||"").trim(), fields:f});
+      body.querySelector("#pf").insertAdjacentHTML("beforeend",'<div class="ok-box" style="margin-top:10px">Saved.</div>');
+    };
+  };
+  const drawSet=()=>{
+    const gs=obj2arr(S.groups).sort(byOrder);
+    body.innerHTML=`<p class="note">Show these on the calendar. Filters reset each visit.</p>
+      <div class="fld"><div class="opts">
+      ${gs.map(g=>`<label><input type="checkbox" class="gf" value="${g.id}" ${!S.filters||S.filters.has(g.id)?"checked":""}>
+        <span class="chip" style="background:${esc(g.color||"#8a8a94")}">${esc(g.name)}</span></label>`).join("")}
+      <label><input type="checkbox" class="gf" value="none" ${!S.filters||S.filters.has("none")?"checked":""}> Ungrouped</label>
+      </div></div>`;
+    body.querySelectorAll(".gf").forEach(c=>c.onchange=()=>{
+      const on=[...body.querySelectorAll(".gf:checked")].map(x=>x.value);
+      const all=gs.map(g=>g.id).concat("none");
+      S.filters = on.length===all.length ? null : new Set(on);
+      renderMember();
+    });
+  };
+  h.querySelector("#t-acct").onclick=drawAcct; h.querySelector("#t-set").onclick=drawSet;
+  drawAcct();
+};
+
+/* =========================================================
+   ADMIN SHELL
+   ========================================================= */
+function tabsFor(role){
+  const mgr=[["cal","Calendar"],["events","Events"],["groups","Groups"],["roster","Roster"],["banner","Banner"]];
+  const chef=[["today","Today"],["menu","Menu"],["specials","Specials"],["hours","Hours"],["events","Events"],["banner","Banner"]];
+  if(role==="mgr")  return mgr;
+  if(role==="chef") return chef;
+  return [["cal","Calendar"],["events","Events"],["groups","Groups"],["roster","Roster"],
+          ["menu","Menu"],["specials","Specials"],["hours","Hours"],["banner","Banner"],["staff","Staff"]];
+}
+const can = {
+  events: () => S.role==="mgr" || S.role==="web",
+  menu:   () => S.role==="chef"|| S.role==="web",
+  staff:  () => S.role==="web",
+  chat:   () => true
+};
+function setupAdmin(){
+  const tabs=tabsFor(S.role);
+  S.tab = S.tab && tabs.some(t=>t[0]===S.tab) ? S.tab : tabs[0][0];
+  $("#ad-who").textContent = (S.role==="mgr"?"Club Manager":S.role==="chef"?"Chef":"Webmaster")+" — "+(S.user?.email||"");
+  $("#ad-tabs").innerHTML = tabs.map(t=>`<button class="tabbtn ${t[0]===S.tab?"on":""}" data-t="${t[0]}">${t[1]}</button>`).join("");
+  $("#ad-tabs").querySelectorAll(".tabbtn").forEach(b=>b.onclick=()=>{ S.tab=b.dataset.t; setupAdmin(); });
+  renderAdmin();
+}
+function renderAdmin(){
+  if(S.role==="member") return;
+  const d=$("#ad-desk");
+  const b=activeBanner();
+  const top = b && !S.bannerDismissed
+    ? `<div class="win"><div class="tb">Live banner — ${b.key==="cbyc"?"CBYC":"Sissy's"}<span class="sp"></span></div>
+       <div class="bd">${esc(b.text)}</div></div>` : "";
+  const views={ cal:viewCal, events:viewEvents, groups:viewGroups, roster:viewRoster, banner:viewBanner,
+                today:viewToday, menu:viewMenu, specials:viewSpecials, hours:viewHours, staff:viewStaff };
+  d.innerHTML = top + (views[S.tab] ? views[S.tab]() : "");
+  (wireUp[S.tab]||(()=>{}))();
+}
+const wireUp={};
+function win(title,bodyHtml,btns){
+  return `<div class="win"><div class="tb">${esc(title)}<span class="sp"></span>${btns||""}</div><div class="bd">${bodyHtml}</div></div>`;
+}
+function modal(title,bodyHtml){
+  const host=document.createElement("div"); host.className="modal";
+  host.innerHTML=`<div class="win"><div class="tb">${esc(title)}<span class="sp"></span><button class="x">×</button></div>
+    <div class="bd">${bodyHtml}</div></div>`;
+  host.querySelector(".x").onclick=()=>host.remove();
+  host.onclick=e=>{ if(e.target===host) host.remove(); };
+  $("#modal-host").appendChild(host); return host;
+}
+
+/* ---------- admin: calendar ---------- */
+function viewCal(){
+  const base=S.calMonth, y=base.getFullYear(), m=base.getMonth();
+  const first=new Date(y,m,1), start=new Date(y,m,1-first.getDay());
+  const byDate={}; eventList().forEach(e=>{ (byDate[e.date]=byDate[e.date]||[]).push(e); });
+  const sp=S.menu?.specials||{};
+  let t=`<div class="row" style="margin-bottom:7px">
+    <button class="b95" id="c-prev">◄</button><b>${MONTHS[m]} ${y}</b><button class="b95" id="c-next">►</button>
+    <span class="sp" style="flex:1"></span>
+    ${can.events()?'<button class="b95" id="c-new">New event…</button>':""}</div>
+    <table class="cal95"><tr>${DAYS.map(d=>`<th>${d}</th>`).join("")}</tr>`;
+  const cur=new Date(start);
+  for(let w=0;w<6;w++){
+    t+="<tr>";
+    for(let i=0;i<7;i++){
+      const ds=ymd(cur), off=cur.getMonth()!==m;
+      const list=byDate[ds]||[];
+      t+=`<td class="${off?"off":""} ${ds===todayStr()?"today":""}" data-d="${ds}">
+        <div class="dn">${cur.getDate()}</div>
+        ${sp[ds]?`<div class="evb" style="background:#800000">🍽 ${esc(sp[ds].title||"Special")}</div>`:""}
+        ${list.map(e=>`<div class="evb" style="background:${esc(groupOf(e.groupId)?.color||"#404040")}"
+            data-e="${e.id}">${e.keyDate?"★ ":""}${esc(e.title)}</div>`).join("")}</td>`;
+      cur.setDate(cur.getDate()+1);
+    }
+    t+="</tr>";
+    if(cur.getMonth()!==m && w>=4) break;
+  }
+  t+="</table><div class='status-bar'>Click a date to add an event. Click an event to open it.</div>";
+  return win("Club Calendar", t);
+}
+wireUp.cal=()=>{
+  $("#c-prev").onclick=()=>{ S.calMonth.setMonth(S.calMonth.getMonth()-1); renderAdmin(); };
+  $("#c-next").onclick=()=>{ S.calMonth.setMonth(S.calMonth.getMonth()+1); renderAdmin(); };
+  $("#c-new")?.addEventListener("click",()=>eventEditor(null,todayStr()));
+  document.querySelectorAll(".cal95 td").forEach(td=>td.onclick=e=>{
+    if(e.target.classList.contains("evb")) return;
+    if(can.events()) eventEditor(null, td.dataset.d);
+  });
+  document.querySelectorAll(".cal95 .evb[data-e]").forEach(b=>b.onclick=e=>{
+    e.stopPropagation(); openEventWindow(b.dataset.e);
+  });
+};
+
+/* ---------- admin: events list ---------- */
+function viewEvents(){
+  const list=eventList();
+  const rows=list.map(e=>{
+    const c=counts(e.id), g=groupOf(e.groupId);
+    return `<tr data-e="${e.id}"><td style="padding:3px 5px">${esc(e.date)}</td>
+      <td style="padding:3px 5px">${esc(fmtTime(e.time))}</td>
+      <td style="padding:3px 5px">${e.keyDate?"★ ":""}<b>${esc(e.title)}</b></td>
+      <td style="padding:3px 5px">${g?`<span class="swatch" style="background:${esc(g.color)}"></span> ${esc(g.name)}`:"—"}</td>
+      <td style="padding:3px 5px">${c.heads}${e.capacity?" / "+esc(e.capacity):""}</td>
+      <td style="padding:3px 5px">${c.pending||0}</td><td style="padding:3px 5px">${c.waitlist||0}</td>
+      <td style="padding:3px 5px">${isPast(e)?"closed":"open"}</td></tr>`;
+  }).join("");
+  return win("Events", `<div class="row" style="margin-bottom:7px">
+      ${can.events()?'<button class="b95" id="e-new">New event…</button>':'<span class="hint">Read-only view.</span>'}</div>
+    <div class="scrollx"><table class="sheet95"><tr><th>Date</th><th>Time</th><th>Event</th><th>Group</th>
+      <th>Heads</th><th>Pending</th><th>Wait</th><th>State</th></tr>${rows||'<tr><td colspan="8" style="padding:6px">No events yet.</td></tr>'}</table></div>
+    <div class="status-bar">${list.length} event(s). Click a row to open the registration sheet.</div>`);
+}
+wireUp.events=()=>{
+  $("#e-new")?.addEventListener("click",()=>eventEditor(null,todayStr()));
+  document.querySelectorAll('table.sheet95 tr[data-e]').forEach(r=>r.onclick=()=>openEventWindow(r.dataset.e));
+};
+
+/* ---------- event editor ---------- */
+function eventEditor(eid, defDate){
+  const e = eid ? {id:eid,...S.events[eid]} : {date:defDate, questions:{}, capacity:0};
+  const gs=obj2arr(S.groups).sort(byOrder);
+  const h=modal(eid?"Edit Event":"New Event",`
+    <div class="row"><div class="f95" style="flex:2;min-width:180px"><label>Title</label>
+      <input type="text" id="ev-title" value="${esc(e.title||"")}"></div></div>
+    <div class="row">
+      <div class="f95" style="flex:1;min-width:130px"><label>Date</label><input type="date" id="ev-date" value="${esc(e.date||"")}"></div>
+      <div class="f95" style="flex:1;min-width:110px"><label>Time</label><input type="time" id="ev-time" value="${esc(e.time||"")}"></div>
+      <div class="f95" style="flex:1;min-width:100px"><label>Capacity (0 = no limit)</label>
+        <input type="number" id="ev-cap" min="0" value="${esc(e.capacity||0)}"></div>
+    </div>
+    <div class="row">
+      <div class="f95" style="flex:1;min-width:150px"><label>Group (one only)</label>
+        <select id="ev-group"><option value="">— none —</option>
+        ${gs.map(g=>`<option value="${g.id}" ${e.groupId===g.id?"selected":""}>${esc(g.name)}</option>`).join("")}</select></div>
+      <div class="f95 inline" style="align-self:flex-end;margin-bottom:9px">
+        <input type="checkbox" id="ev-key" ${e.keyDate?"checked":""}><label for="ev-key">Key date (highlight)</label></div>
+    </div>
+    <div class="f95"><label>Description</label><textarea id="ev-desc" rows="3">${esc(e.desc||"")}</textarea></div>
+    <fieldset><legend>Registration form</legend>
+      <p class="hint">Name and party size are always asked. Add anything else this event needs — each question becomes a column on the sheet.</p>
+      <div id="q-list"></div>
+      <button class="b95 sm" id="q-add" type="button">Add question</button>
+    </fieldset>
+    <div class="row"><button class="b95" id="ev-save">Save</button>
+      ${eid?'<button class="b95" id="ev-del">Delete event</button>':""}
+      <button class="b95" id="ev-cancel">Cancel</button>
+      ${eid?'<span class="hint" style="margin-left:auto">Changing questions never deletes answers already given.</span>':""}</div>`);
+
+  let qs=obj2arr(e.questions).sort(byOrder);
+  const drawQs=()=>{
+    h.querySelector("#q-list").innerHTML = qs.map((q,i)=>`
+      <div class="row" data-i="${i}" style="margin-bottom:4px">
+        <input type="text" class="q-label" value="${esc(q.label||"")}" placeholder="Question" style="flex:2;min-width:140px;border:2px inset #fff;padding:2px 4px">
+        <select class="q-type" style="border:2px inset #fff;padding:2px">
+          ${["text","yesno","number","choice","checklist"].map(t=>`<option value="${t}" ${q.type===t?"selected":""}>${t}</option>`).join("")}
+        </select>
+        <input type="text" class="q-opts" value="${esc(q.options||"")}" placeholder="options, comma, separated"
+          style="flex:1;min-width:120px;border:2px inset #fff;padding:2px 4px;${["choice","checklist"].includes(q.type)?"":"visibility:hidden"}">
+        <label><input type="checkbox" class="q-req" ${q.required?"checked":""}> req</label>
+        <button class="b95 sm q-up" type="button">▲</button><button class="b95 sm q-dn" type="button">▼</button>
+        <button class="b95 sm q-rm" type="button">✕</button>
+      </div>`).join("") || '<p class="hint">No extra questions.</p>';
+    h.querySelectorAll("#q-list .row").forEach(row=>{
+      const i=+row.dataset.i;
+      row.querySelector(".q-label").oninput=ev=>qs[i].label=ev.target.value;
+      row.querySelector(".q-type").onchange=ev=>{ qs[i].type=ev.target.value; drawQs(); };
+      row.querySelector(".q-opts").oninput=ev=>qs[i].options=ev.target.value;
+      row.querySelector(".q-req").onchange=ev=>qs[i].required=ev.target.checked;
+      row.querySelector(".q-rm").onclick=()=>{ qs.splice(i,1); drawQs(); };
+      row.querySelector(".q-up").onclick=()=>{ if(i>0){ [qs[i-1],qs[i]]=[qs[i],qs[i-1]]; drawQs(); } };
+      row.querySelector(".q-dn").onclick=()=>{ if(i<qs.length-1){ [qs[i+1],qs[i]]=[qs[i],qs[i+1]]; drawQs(); } };
+    });
+  };
+  drawQs();
+  h.querySelector("#q-add").onclick=()=>{ qs.push({id:"q"+Date.now().toString(36)+Math.floor(Math.random()*999),
+    label:"",type:"text",options:"",required:false}); drawQs(); };
+  h.querySelector("#ev-cancel").onclick=()=>h.remove();
+  h.querySelector("#ev-del")?.addEventListener("click",async()=>{
+    if(!confirm("Delete this event and its registration sheet?")) return;
+    await remove(ref(db,"events/"+eid)); await remove(ref(db,"regs/"+eid));
+    await remove(ref(db,"regDetails/"+eid)); await remove(ref(db,"eventChat/"+eid));
+    h.remove();
+  });
+  h.querySelector("#ev-save").onclick=async()=>{
+    const title=h.querySelector("#ev-title").value.trim();
+    const date =h.querySelector("#ev-date").value;
+    if(!title||!date) return alert("A title and a date are required.");
+    const qobj={}; qs.forEach((q,i)=>{ if(q.label.trim()) qobj[q.id]={label:q.label.trim(),type:q.type,
+      options:q.options||"",required:!!q.required,order:i}; });
+    const data={ title, date, time:h.querySelector("#ev-time").value||"",
+      desc:h.querySelector("#ev-desc").value||"", capacity:Number(h.querySelector("#ev-cap").value||0),
+      groupId:h.querySelector("#ev-group").value||"", keyDate:h.querySelector("#ev-key").checked,
+      questions:qobj, createdAt:e.createdAt||Date.now() };
+    if(eid) await update(ref(db,"events/"+eid),data);
+    else    await set(push(ref(db,"events")),data);
+    h.remove();
+  };
+}
+
+/* ---------- event window: attendee sheet + chat ---------- */
+async function openEventWindow(eid){
+  const ev=S.events?.[eid]; if(!ev) return;
+  const e={id:eid,...ev};
+  const details=(await get(ref(db,"regDetails/"+eid))).val()||{};
+  const qs=obj2arr(e.questions).sort(byOrder);
+  const past=isPast(e); const editable=can.events() && !past;
+  const sp=S.menu?.specials?.[e.date];
+
+  const build=()=>{
+    const rs=regsFor(eid).sort((a,b)=>(a.at||0)-(b.at||0));
+    const c=counts(eid);
+    const head=`<tr><th>Name</th><th>Status</th><th>Party</th>${qs.map(q=>`<th>${esc(q.label)}</th>`).join("")}
+      <th>Pre-order</th><th>Note</th><th>Submitted</th>${editable?"<th></th>":""}</tr>`;
+    const rows=rs.map(r=>{
+      const d=details[r.id]||{};
+      return `<tr data-r="${r.id}">
+        <td><input class="c" data-f="name" value="${esc(d.name||"")}" ${editable?"":"disabled"}></td>
+        <td><select class="c" data-f="status" ${editable?"":"disabled"}>
+          ${["pending","approved","waitlist","declined","cancelled"].map(s=>`<option ${r.status===s?"selected":""}>${s}</option>`).join("")}
+        </select></td>
+        <td><input class="c" data-f="headcount" type="number" min="1" value="${esc(r.headcount||1)}" ${editable?"":"disabled"}></td>
+        ${qs.map(q=>`<td><input class="c" data-f="a_${q.id}" value="${esc(d.answers?.[q.id]||"")}" ${editable?"":"disabled"}></td>`).join("")}
+        <td><input class="c" data-f="preorder" value="${esc(d.preorder||"")}" ${editable?"":"disabled"}></td>
+        <td><input class="c" data-f="note" value="${esc(d.note||"")}" ${editable?"":"disabled"}></td>
+        <td style="padding:3px 5px;white-space:nowrap">${r.at?new Date(r.at).toLocaleDateString():""}</td>
+        ${editable?'<td><button class="b95 sm rm">✕</button></td>':""}</tr>`;
+    }).join("");
+    return `<div class="row" style="margin-bottom:6px">
+        <b>${esc(e.title)}</b> — ${esc(fmtDate(e.date))} ${esc(fmtTime(e.time))}
+        <span style="flex:1"></span>
+        ${can.events()?'<button class="b95 sm" id="w-edit">Edit event…</button>':""}
+        <button class="b95 sm" id="w-csv">Export CSV</button></div>
+      ${past?'<div class="dirty">Past event — locked.</div>':""}
+      ${sp?`<div class="hint" style="margin-bottom:5px">Sissy's special menu attached: <b>${esc(sp.title||"Special menu")}</b></div>`:""}
+      <div class="scrollx"><table class="sheet95">${head}${rows||`<tr><td colspan="9" style="padding:6px">Nobody registered yet.</td></tr>`}</table></div>
+      <div class="status-bar">Capacity ${e.capacity||"∞"} · ${c.heads} heads · ${c.approved||0} approved ·
+        ${c.pending||0} pending · ${c.waitlist||0} waitlisted
+        ${e.capacity&&c.heads>=e.capacity?" · <b>FULL — new signups go to the waitlist</b>":""}</div>
+      ${editable?'<div class="row" style="margin-top:7px"><button class="b95" id="w-add">Add person manually</button>'+
+        '<span class="hint">Manual additions may exceed capacity — you decide who comes in.</span></div>':""}
+      <fieldset style="margin-top:9px"><legend>Notes between Club Manager and Chef</legend>
+        <div class="chatbox" id="w-chat">loading…</div>
+        <div class="row" style="margin-top:5px"><input type="text" id="w-msg" placeholder="Message…"
+          style="flex:1;border:2px inset #fff;padding:3px 5px"><button class="b95" id="w-send">Send</button></div>
+        <p class="hint">Members never see this.</p></fieldset>`;
+  };
+
+  const h=modal("Event — "+e.title, build());
+  const rewire=()=>{
+    h.querySelectorAll("tr[data-r]").forEach(tr=>{
+      const rid=tr.dataset.r;
+      tr.querySelectorAll(".c").forEach(inp=>inp.onchange=async()=>{
+        const f=inp.dataset.f, v=inp.value;
+        if(f==="status")          await update(ref(db,`regs/${eid}/${rid}`),{status:v});
+        else if(f==="headcount")  await update(ref(db,`regs/${eid}/${rid}`),{headcount:Number(v||1)});
+        else if(f.startsWith("a_"))await update(ref(db,`regDetails/${eid}/${rid}/answers`),{[f.slice(2)]:v});
+        else                      await update(ref(db,`regDetails/${eid}/${rid}`),{[f]:v});
+        details[rid]=details[rid]||{}; if(f.startsWith("a_")){ details[rid].answers=details[rid].answers||{};
+          details[rid].answers[f.slice(2)]=v; } else details[rid][f]=v;
+        inp.style.background="#e6ffe6"; setTimeout(()=>inp.style.background="",400);
+      });
+      tr.querySelector(".rm")?.addEventListener("click",async()=>{
+        if(!confirm("Remove this person from the sheet?")) return;
+        await remove(ref(db,`regs/${eid}/${rid}`)); await remove(ref(db,`regDetails/${eid}/${rid}`));
+        delete details[rid]; redraw();
+      });
+    });
+    h.querySelector("#w-edit")?.addEventListener("click",()=>{ h.remove(); eventEditor(eid); });
+    h.querySelector("#w-add")?.addEventListener("click",async()=>{
+      const name=prompt("Name to add:"); if(!name) return;
+      const rid=push(ref(db,`regs/${eid}`)).key;
+      await set(ref(db,`regs/${eid}/${rid}`),{uid:"manual",headcount:1,status:"approved",at:Date.now()});
+      await set(ref(db,`regDetails/${eid}/${rid}`),{name,email:"",answers:{},preorder:"",note:"added by manager"});
+      details[rid]={name,email:"",answers:{},preorder:"",note:"added by manager"};
+      redraw();
+    });
+    h.querySelector("#w-csv").onclick=()=>{
+      const rs=regsFor(eid).sort((a,b)=>(a.at||0)-(b.at||0));
+      const cols=["Name","Status","Party",...qs.map(q=>q.label),"Pre-order","Note"];
+      const lines=[cols.join(",")].concat(rs.map(r=>{
+        const d=details[r.id]||{};
+        return [d.name||"",r.status,r.headcount||1,...qs.map(q=>d.answers?.[q.id]||""),d.preorder||"",d.note||""]
+          .map(v=>`"${String(v).replace(/"/g,'""')}"`).join(",");
+      }));
+      const url=URL.createObjectURL(new Blob([lines.join("\n")],{type:"text/csv"}));
+      const a=document.createElement("a"); a.href=url; a.download=(e.title||"event").replace(/\W+/g,"_")+".csv"; a.click();
+      URL.revokeObjectURL(url);
+    };
+    const send=async()=>{
+      const t=h.querySelector("#w-msg").value.trim(); if(!t) return;
+      await set(push(ref(db,"eventChat/"+eid)),{uid:S.user.uid,
+        name:S.role==="chef"?"Chef":S.role==="mgr"?"Club Manager":"Webmaster", text:t, at:Date.now()});
+      h.querySelector("#w-msg").value="";
+    };
+    h.querySelector("#w-send").onclick=send;
+    h.querySelector("#w-msg").onkeydown=ev=>{ if(ev.key==="Enter") send(); };
+  };
+  const redraw=()=>{ h.querySelector(".bd").innerHTML=build(); rewire(); startChat(); };
+  let chatUnsub=null;
+  const startChat=()=>{
+    if(chatUnsub) chatUnsub();
+    chatUnsub=onValue(ref(db,"eventChat/"+eid),snap=>{
+      const box=h.querySelector("#w-chat"); if(!box) return;
+      const msgs=obj2arr(snap.val()||{}).sort((a,b)=>(a.at||0)-(b.at||0));
+      box.innerHTML = msgs.length ? msgs.map(m=>`<div class="m"><b>${esc(m.name)}</b>
+        <i>${new Date(m.at).toLocaleString()}</i><br>${esc(m.text)}</div>`).join("")
+        : '<span class="hint">No notes yet.</span>';
+      box.scrollTop=box.scrollHeight;
+    },()=>{});
+  };
+  rewire(); startChat();
+  h.querySelector(".x").onclick=()=>{ if(chatUnsub) chatUnsub(); h.remove(); };
+}
+
+/* ---------- admin: groups ---------- */
+function viewGroups(){
+  const gs=obj2arr(S.groups).sort(byOrder);
+  return win("Groups", `<p class="hint">One group per event. Members filter the calendar by these.</p>
+    <div class="scrollx" style="max-height:none"><table class="sheet95">
+      <tr><th>Name</th><th>Color</th><th>Events</th><th></th></tr>
+      ${gs.map(g=>`<tr data-g="${g.id}">
+        <td><input class="gn" value="${esc(g.name)}"></td>
+        <td style="padding:3px 5px">${PALETTE.map(c=>`<button class="pc" data-c="${c}"
+            style="width:17px;height:17px;border:${g.color===c?"2px solid #000":"1px solid #888"};background:${c};padding:0"></button>`).join("")}</td>
+        <td style="padding:3px 5px">${eventList().filter(e=>e.groupId===g.id).length}</td>
+        <td><button class="b95 sm grm">✕</button></td></tr>`).join("")}
+    </table></div>
+    <div class="row" style="margin-top:7px"><input type="text" id="g-new" placeholder="New group name"
+      style="border:2px inset #fff;padding:3px 5px"><button class="b95" id="g-add">Add group</button></div>`);
+}
+wireUp.groups=()=>{
+  $("#g-add").onclick=async()=>{
+    const n=$("#g-new").value.trim(); if(!n) return;
+    await set(push(ref(db,"groups")),{name:n,color:PALETTE[obj2arr(S.groups).length%PALETTE.length],
+      order:obj2arr(S.groups).length});
+    $("#g-new").value="";
+  };
+  document.querySelectorAll("tr[data-g]").forEach(tr=>{
+    const gid=tr.dataset.g;
+    tr.querySelector(".gn").onchange=e=>update(ref(db,"groups/"+gid),{name:e.target.value});
+    tr.querySelectorAll(".pc").forEach(b=>b.onclick=()=>update(ref(db,"groups/"+gid),{color:b.dataset.c}));
+    tr.querySelector(".grm").onclick=async()=>{
+      const used=eventList().filter(e=>e.groupId===gid);
+      if(used.length) return alert(`${used.length} event(s) still use this group. Reassign them first.`);
+      if(confirm("Delete this group?")) await remove(ref(db,"groups/"+gid));
+    };
+  });
+};
+
+/* ---------- admin: roster ---------- */
+function viewRoster(){
+  const fields=obj2arr(S.profileFields).sort(byOrder);
+  const ms=obj2arr(S.roster).sort((a,b)=>String(a.name||"").localeCompare(String(b.name||"")));
+  return win("Roster", `<p class="hint">Only emails on this list can get in. A member may have several.</p>
+    <div class="scrollx"><table class="sheet95">
+      <tr><th>Name</th><th>Emails</th>${fields.map(f=>`<th>${esc(f.label)}</th>`).join("")}<th>Active</th><th></th></tr>
+      ${ms.map(m=>`<tr data-m="${m.id}">
+        <td><input class="rn" value="${esc(m.name||"")}"></td>
+        <td style="padding:3px 5px">${Object.keys(m.emails||{}).map(k=>esc(k.replace(/,/g,"."))).join("<br>")||"—"}
+          <button class="b95 sm ae">+</button></td>
+        ${fields.map(f=>`<td><input class="rf" data-f="${f.id}" value="${esc(m.fields?.[f.id]||"")}"></td>`).join("")}
+        <td style="text-align:center"><input type="checkbox" class="ra" ${m.active!==false?"checked":""}></td>
+        <td><button class="b95 sm rrm">✕</button></td></tr>`).join("")}
+    </table></div>
+    <div class="row" style="margin-top:7px">
+      <input type="text" id="r-name" placeholder="Name" style="border:2px inset #fff;padding:3px 5px">
+      <input type="email" id="r-email" placeholder="email@example.com" style="border:2px inset #fff;padding:3px 5px">
+      <button class="b95" id="r-add">Add member</button></div>
+    <fieldset style="margin-top:9px"><legend>Profile fields</legend>
+      <p class="hint">Name is always required. Add any other field you want on member profiles.</p>
+      <div class="row">${fields.map(f=>`<span class="b95 sm" style="cursor:default">${esc(f.label)}
+        <button class="b95 sm pfrm" data-f="${f.id}" style="margin-left:4px">✕</button></span>`).join("")||'<span class="hint">None.</span>'}</div>
+      <div class="row" style="margin-top:6px"><input type="text" id="pf-new" placeholder="Field label"
+        style="border:2px inset #fff;padding:3px 5px"><button class="b95" id="pf-add">Add field</button></div>
+    </fieldset>`);
+}
+wireUp.roster=()=>{
+  $("#r-add").onclick=async()=>{
+    const n=$("#r-name").value.trim(), em=$("#r-email").value.trim().toLowerCase();
+    if(!n||!em) return alert("Name and one email are needed.");
+    const mid=push(ref(db,"roster")).key;
+    await set(ref(db,"roster/"+mid),{name:n,active:true,emails:{[encEmail(em)]:true},fields:{}});
+    await set(ref(db,"rosterEmails/"+encEmail(em)),mid);
+    $("#r-name").value=""; $("#r-email").value="";
+  };
+  document.querySelectorAll("tr[data-m]").forEach(tr=>{
+    const mid=tr.dataset.m;
+    tr.querySelector(".rn").onchange=e=>update(ref(db,"roster/"+mid),{name:e.target.value});
+    tr.querySelector(".ra").onchange=e=>update(ref(db,"roster/"+mid),{active:e.target.checked});
+    tr.querySelectorAll(".rf").forEach(i=>i.onchange=()=>
+      update(ref(db,`roster/${mid}/fields`),{[i.dataset.f]:i.value}));
+    tr.querySelector(".ae").onclick=async()=>{
+      const em=prompt("Additional email for this member:"); if(!em) return;
+      await update(ref(db,`roster/${mid}/emails`),{[encEmail(em)]:true});
+      await set(ref(db,"rosterEmails/"+encEmail(em)),mid);
+    };
+    tr.querySelector(".rrm").onclick=async()=>{
+      if(!confirm("Remove this member from the roster? They lose access.")) return;
+      const m=S.roster[mid]||{};
+      for(const k of Object.keys(m.emails||{})) await remove(ref(db,"rosterEmails/"+k));
+      await remove(ref(db,"roster/"+mid));
+    };
+  });
+  $("#pf-add").onclick=async()=>{
+    const l=$("#pf-new").value.trim(); if(!l) return;
+    await set(push(ref(db,"profileFields")),{label:l,required:false,order:obj2arr(S.profileFields).length});
+    $("#pf-new").value="";
+  };
+  document.querySelectorAll(".pfrm").forEach(b=>b.onclick=()=>{
+    if(confirm("Remove this profile field?")) remove(ref(db,"profileFields/"+b.dataset.f));
+  });
+};
+
+/* ---------- admin: banner ---------- */
+function viewBanner(){
+  const mine = S.role==="chef" ? "sissys" : S.role==="mgr" ? "cbyc" : null;
+  const box=k=>{
+    const b=S.banner?.[k]||{}; const own = mine===k || S.role==="web";
+    return `<fieldset><legend>${k==="cbyc"?"CBYC":"Sissy's"} banner</legend>
+      <div class="f95"><textarea id="bn-${k}" rows="2" ${own?"":"disabled"}>${esc(b.text||"")}</textarea></div>
+      <div class="row"><label class="hint">Expires</label>
+        <input type="datetime-local" id="bx-${k}" ${own?"":"disabled"}
+          value="${b.expires?new Date(b.expires-new Date().getTimezoneOffset()*60000).toISOString().slice(0,16):""}">
+        ${own?`<button class="b95" data-post="${k}">Post</button><button class="b95" data-clear="${k}">Clear</button>`:'<span class="hint">Read-only.</span>'}
+      </div>
+      <p class="hint">${b.at?"Last posted "+new Date(b.at).toLocaleString():"Never posted."}</p></fieldset>`;
+  };
+  return win("Banner", `<p class="hint">One banner shows at the top of every screen — the most recent active post wins.</p>
+    ${box("cbyc")}${box("sissys")}`);
+}
+wireUp.banner=()=>{
+  document.querySelectorAll("[data-post]").forEach(b=>b.onclick=async()=>{
+    const k=b.dataset.post, t=$("#bn-"+k).value.trim(), x=$("#bx-"+k).value;
+    if(!t) return alert("Nothing to post.");
+    await set(ref(db,"banner/"+k),{text:t,at:Date.now(),expires:x?new Date(x).getTime():0});
+    S.bannerDismissed=false;
+  });
+  document.querySelectorAll("[data-clear]").forEach(b=>b.onclick=()=>remove(ref(db,"banner/"+b.dataset.clear)));
+};
+
+/* ---------- admin: staff (webmaster) ---------- */
+function viewStaff(){
+  return win("Staff accounts", `<p class="hint">These two emails get the admin sides. Set them to verified accounts.</p>
+    <div class="f95"><label>Club Manager email</label><input type="email" id="st-mgr" value="${esc(S.staff?.clubManagerEmail||"")}"></div>
+    <div class="f95"><label>Chef email</label><input type="email" id="st-chef" value="${esc(S.staff?.chefEmail||"")}"></div>
+    <button class="b95" id="st-save">Save</button>
+    <p class="hint" style="margin-top:7px">Webmaster is fixed to ${esc(WEBMASTER)} in the page source and in the database rules.</p>`);
+}
+wireUp.staff=()=>{
+  $("#st-save").onclick=async()=>{
+    await set(ref(db,"staff"),{clubManagerEmail:$("#st-mgr").value.trim().toLowerCase(),
+      chefEmail:$("#st-chef").value.trim().toLowerCase()});
+    alert("Saved. They'll get their side next time they sign in.");
+  };
+};
+
+/* ---------- chef: today ---------- */
+function viewToday(){
+  const t=todayStr(), h=hoursFor(t);
+  const evs=eventList().filter(e=>e.date===t);
+  const m=dayMenu(t), six=S.six?.[t]||{};
+  const items=obj2arr(m.items).sort(byOrder);
+  return win("Today — "+fmtDate(t), `
+    <fieldset><legend>Service</legend>
+      ${h?(h.closed?"<b>CLOSED today</b>":"Open <b>"+esc(h.open||"")+"</b> to <b>"+esc(h.close||"")+"</b>")
+         :'<span class="hint">No hours set for today.</span>'}
+      ${m.special?`<div class="dirty" style="margin-top:6px">Special menu today: ${esc(m.title)}</div>`:""}
+    </fieldset>
+    <fieldset><legend>Club events today</legend>
+      ${evs.length?evs.map(e=>{const c=counts(e.id);
+        return `<div class="row" style="margin-bottom:3px"><b>${esc(e.title)}</b> ${esc(fmtTime(e.time))}
+          — ${c.heads} heads (${c.approved||0} approved, ${c.pending||0} pending)
+          <button class="b95 sm open-ev" data-e="${e.id}">Open</button></div>`;}).join("")
+        :'<span class="hint">Nothing on today.</span>'}
+    </fieldset>
+    <fieldset><legend>86 an item (today only)</legend>
+      ${items.length?items.map(i=>`<label class="b95 sm" style="display:inline-block;margin:2px;cursor:pointer">
+          <input type="checkbox" class="six" data-i="${i.id}" ${six[i.id]?"checked":""}> ${esc(i.name)}</label>`).join("")
+        :'<span class="hint">Nothing on the menu today.</span>'}
+      <p class="hint">Resets on its own tomorrow.</p>
+    </fieldset>`);
+}
+wireUp.today=()=>{
+  document.querySelectorAll(".open-ev").forEach(b=>b.onclick=()=>openEventWindow(b.dataset.e));
+  document.querySelectorAll(".six").forEach(c=>c.onchange=()=>{
+    const p=`eightySix/${todayStr()}/${c.dataset.i}`;
+    c.checked ? set(ref(db,p),true) : remove(ref(db,p));
+  });
+};
+
+/* ---------- chef: weekly menu (draft) ---------- */
+function draftOrPub(){ return Object.keys(S.draft||{}).length ? S.draft : (S.menu||{}); }
+function dirtyFlag(){
+  return JSON.stringify(S.draft||{}) !== JSON.stringify(S.menu||{}) && Object.keys(S.draft||{}).length;
+}
+async function ensureDraft(){
+  if(!Object.keys(S.draft||{}).length){
+    const base=JSON.parse(JSON.stringify(S.menu||{sections:{},items:{},specials:{}}));
+    await set(ref(db,"menu/draft"),base); S.draft=base;
+  }
+  return S.draft;
+}
+function viewMenu(){
+  const d=draftOrPub();
+  const secs=obj2arr(d.sections).sort(byOrder);
+  const items=obj2arr(d.items).sort(byOrder);
+  return win("Weekly menu (draft)", `
+    ${dirtyFlag()?'<div class="dirty">Unpublished changes — members still see the live menu.</div>':""}
+    <div class="row" style="margin-bottom:7px">
+      <button class="b95" id="mn-pub">Publish everything</button>
+      <button class="b95" id="mn-discard">Discard draft</button>
+      <span class="hint">One draft covers the weekly menu and every special date.</span></div>
+    <fieldset><legend>Sections</legend>
+      <div class="row">${secs.map(s=>`<span class="b95 sm" style="cursor:default">
+        <input class="sn" data-s="${s.id}" value="${esc(s.name)}" style="border:0;background:transparent;width:90px">
+        <button class="b95 sm srm" data-s="${s.id}">✕</button></span>`).join("")||'<span class="hint">None yet.</span>'}</div>
+      <div class="row" style="margin-top:6px"><input type="text" id="sec-new" placeholder="Section name"
+        style="border:2px inset #fff;padding:3px 5px"><button class="b95" id="sec-add">Add section</button></div>
+    </fieldset>
+    <fieldset><legend>Items — tick the days each one is served</legend>
+      <div class="scrollx" style="max-height:none"><table class="sheet95">
+        <tr><th>Item</th><th>Price</th><th>Description</th><th>Section</th><th>Days</th><th></th></tr>
+        ${items.map(i=>`<tr data-i="${i.id}">
+          <td><input class="mi-f" data-f="name" value="${esc(i.name||"")}"></td>
+          <td style="width:70px"><input class="mi-f" data-f="price" value="${esc(i.price||"")}"></td>
+          <td><input class="mi-f" data-f="desc" value="${esc(i.desc||"")}"></td>
+          <td><select class="mi-f" data-f="sectionId"><option value="">—</option>
+            ${secs.map(s=>`<option value="${s.id}" ${i.sectionId===s.id?"selected":""}>${esc(s.name)}</option>`).join("")}</select></td>
+          <td style="padding:2px"><div class="daybox">${DAYS.map((dn,ix)=>`
+            <label class="${i.days&&i.days[ix]?"on":""}"><input type="checkbox" class="mi-d" data-d="${ix}"
+              ${i.days&&i.days[ix]?"checked":""}>${dn[0]}</label>`).join("")}</div></td>
+          <td><button class="b95 sm mi-rm">✕</button></td></tr>`).join("")
+          ||'<tr><td colspan="6" style="padding:6px">No items yet.</td></tr>'}
+      </table></div>
+      <div class="row" style="margin-top:6px"><input type="text" id="it-new" placeholder="New item name"
+        style="border:2px inset #fff;padding:3px 5px"><button class="b95" id="it-add">Add item</button></div>
+    </fieldset>`);
+}
+wireUp.menu=()=>{
+  const path=(...p)=>"menu/draft/"+p.join("/");
+  $("#sec-add").onclick=async()=>{
+    const n=$("#sec-new").value.trim(); if(!n) return; const d=await ensureDraft();
+    await set(ref(db,path("sections",push(ref(db,"menu/draft/sections")).key)),
+      {name:n,order:Object.keys(d.sections||{}).length});
+    $("#sec-new").value="";
+  };
+  $("#it-add").onclick=async()=>{
+    const n=$("#it-new").value.trim(); if(!n) return; const d=await ensureDraft();
+    await set(ref(db,path("items",push(ref(db,"menu/draft/items")).key)),
+      {name:n,price:"",desc:"",sectionId:"",days:{},order:Object.keys(d.items||{}).length});
+    $("#it-new").value="";
+  };
+  document.querySelectorAll(".sn").forEach(i=>i.onchange=async()=>{ await ensureDraft();
+    update(ref(db,path("sections",i.dataset.s)),{name:i.value}); });
+  document.querySelectorAll(".srm").forEach(b=>b.onclick=async()=>{
+    if(!confirm("Delete this section? Items stay but lose their section.")) return;
+    await ensureDraft(); remove(ref(db,path("sections",b.dataset.s)));
+  });
+  document.querySelectorAll("tr[data-i]").forEach(tr=>{
+    const iid=tr.dataset.i;
+    tr.querySelectorAll(".mi-f").forEach(inp=>inp.onchange=async()=>{ await ensureDraft();
+      update(ref(db,path("items",iid)),{[inp.dataset.f]:inp.value}); });
+    tr.querySelectorAll(".mi-d").forEach(c=>c.onchange=async()=>{ await ensureDraft();
+      const p=path("items",iid,"days",c.dataset.d);
+      c.checked ? set(ref(db,p),true) : remove(ref(db,p));
+      c.closest("label").classList.toggle("on",c.checked); });
+    tr.querySelector(".mi-rm").onclick=async()=>{ if(!confirm("Delete this item?")) return;
+      await ensureDraft(); remove(ref(db,path("items",iid))); };
+  });
+  $("#mn-pub").onclick=async()=>{
+    if(!Object.keys(S.draft||{}).length) return alert("Nothing in the draft.");
+    if(!confirm("Publish the draft? Members see it immediately.")) return;
+    await set(ref(db,"menu/published"),S.draft); alert("Published.");
+  };
+  $("#mn-discard").onclick=async()=>{
+    if(!confirm("Throw away the draft and start again from the live menu?")) return;
+    await set(ref(db,"menu/draft"),JSON.parse(JSON.stringify(S.menu||{sections:{},items:{},specials:{}})));
+  };
+};
+
+/* ---------- chef: special dates ---------- */
+function viewSpecials(){
+  const d=draftOrPub();
+  const sp=Object.entries(d.specials||{}).sort((a,b)=>a[0].localeCompare(b[0]));
+  const evsByDate={}; eventList().forEach(e=>{ (evsByDate[e.date]=evsByDate[e.date]||[]).push(e.title); });
+  return win("Special date menus (draft)", `
+    ${dirtyFlag()?'<div class="dirty">Unpublished changes — publish from the Menu tab or below.</div>':""}
+    <p class="hint">A special menu replaces that day's regular menu entirely. Published specials are visible straight away, however far ahead.</p>
+    <div class="row" style="margin-bottom:7px">
+      <input type="date" id="sp-date" style="border:2px inset #fff;padding:2px 4px">
+      <input type="text" id="sp-title" placeholder="e.g. Prime rib night" style="border:2px inset #fff;padding:3px 5px">
+      <button class="b95" id="sp-add">Create</button>
+      <button class="b95" id="sp-pub">Publish everything</button></div>
+    <div class="scrollx" style="max-height:none"><table class="sheet95">
+      <tr><th>Date</th><th>Title</th><th>Items</th><th>Club event that day</th><th></th></tr>
+      ${sp.map(([date,s])=>`<tr data-sp="${date}">
+        <td style="padding:3px 5px">${esc(fmtDate(date))}<br><span class="hint">${esc(date)}</span></td>
+        <td><input class="sp-t" value="${esc(s.title||"")}"></td>
+        <td style="padding:3px 5px">${Object.keys(s.items||{}).length}</td>
+        <td style="padding:3px 5px">${esc((evsByDate[date]||[]).join(", ")||"—")}</td>
+        <td style="white-space:nowrap"><button class="b95 sm sp-ed">Edit…</button>
+          <button class="b95 sm sp-rm">✕</button></td></tr>`).join("")
+        ||'<tr><td colspan="5" style="padding:6px">No special menus.</td></tr>'}
+    </table></div>`);
+}
+wireUp.specials=()=>{
+  const P=d=>"menu/draft/specials/"+d;
+  $("#sp-add").onclick=async()=>{
+    const date=$("#sp-date").value, title=$("#sp-title").value.trim();
+    if(!date) return alert("Pick a date.");
+    await ensureDraft();
+    await set(ref(db,P(date)),{title:title||"Special menu",sections:{},items:{}});
+    $("#sp-title").value="";
+  };
+  $("#sp-pub").onclick=async()=>{
+    if(!confirm("Publish the draft? Members see it immediately.")) return;
+    await set(ref(db,"menu/published"),S.draft); alert("Published.");
+  };
+  document.querySelectorAll("tr[data-sp]").forEach(tr=>{
+    const date=tr.dataset.sp;
+    tr.querySelector(".sp-t").onchange=async e=>{ await ensureDraft(); update(ref(db,P(date)),{title:e.target.value}); };
+    tr.querySelector(".sp-rm").onclick=async()=>{ if(!confirm("Delete this special menu?")) return;
+      await ensureDraft(); remove(ref(db,P(date))); };
+    tr.querySelector(".sp-ed").onclick=()=>specialEditor(date);
+  });
+};
+function specialEditor(date){
+  const draw=()=>{
+    const s=(draftOrPub().specials||{})[date]||{title:"",sections:{},items:{}};
+    const secs=obj2arr(s.sections).sort(byOrder), items=obj2arr(s.items).sort(byOrder);
+    return `<div class="row" style="margin-bottom:6px"><b>${esc(fmtDate(date))}</b>
+      <input type="text" id="se-title" value="${esc(s.title||"")}" style="flex:1;border:2px inset #fff;padding:3px 5px">
+      <button class="b95 sm" id="se-copy">Copy from weekly menu…</button></div>
+      <fieldset><legend>Sections</legend><div class="row">
+        ${secs.map(x=>`<span class="b95 sm" style="cursor:default">
+          <input class="se-sn" data-s="${x.id}" value="${esc(x.name)}" style="border:0;background:transparent;width:90px">
+          <button class="b95 sm se-srm" data-s="${x.id}">✕</button></span>`).join("")||'<span class="hint">None.</span>'}</div>
+        <div class="row" style="margin-top:6px"><input type="text" id="se-secnew" placeholder="Section"
+          style="border:2px inset #fff;padding:3px 5px"><button class="b95" id="se-secadd">Add</button></div></fieldset>
+      <div class="scrollx"><table class="sheet95">
+        <tr><th>Item</th><th>Price</th><th>Description</th><th>Section</th><th></th></tr>
+        ${items.map(i=>`<tr data-i="${i.id}">
+          <td><input class="se-f" data-f="name" value="${esc(i.name||"")}"></td>
+          <td style="width:70px"><input class="se-f" data-f="price" value="${esc(i.price||"")}"></td>
+          <td><input class="se-f" data-f="desc" value="${esc(i.desc||"")}"></td>
+          <td><select class="se-f" data-f="sectionId"><option value="">—</option>
+            ${secs.map(x=>`<option value="${x.id}" ${i.sectionId===x.id?"selected":""}>${esc(x.name)}</option>`).join("")}</select></td>
+          <td><button class="b95 sm se-rm">✕</button></td></tr>`).join("")
+          ||'<tr><td colspan="5" style="padding:6px">No items.</td></tr>'}
+      </table></div>
+      <div class="row" style="margin-top:6px"><input type="text" id="se-new" placeholder="New dish"
+        style="border:2px inset #fff;padding:3px 5px"><button class="b95" id="se-add">Add dish</button>
+        <span class="hint">This menu replaces the regular one on this date.</span></div>`;
+  };
+  const h=modal("Special menu — "+date, draw());
+  const P=(...p)=>["menu/draft/specials",date,...p].join("/");
+  const rewire=()=>{
+    h.querySelector("#se-title").onchange=async e=>{ await ensureDraft(); update(ref(db,P()),{title:e.target.value}); };
+    h.querySelector("#se-secadd").onclick=async()=>{
+      const n=h.querySelector("#se-secnew").value.trim(); if(!n) return; await ensureDraft();
+      const s=(draftOrPub().specials||{})[date]||{};
+      await set(ref(db,P("sections",push(ref(db,P("sections"))).key)),{name:n,order:Object.keys(s.sections||{}).length});
+      setTimeout(refresh,150);
+    };
+    h.querySelectorAll(".se-sn").forEach(i=>i.onchange=async()=>{ await ensureDraft();
+      update(ref(db,P("sections",i.dataset.s)),{name:i.value}); });
+    h.querySelectorAll(".se-srm").forEach(b=>b.onclick=async()=>{ await ensureDraft();
+      await remove(ref(db,P("sections",b.dataset.s))); setTimeout(refresh,150); });
+    h.querySelector("#se-add").onclick=async()=>{
+      const n=h.querySelector("#se-new").value.trim(); if(!n) return; await ensureDraft();
+      const s=(draftOrPub().specials||{})[date]||{};
+      await set(ref(db,P("items",push(ref(db,P("items"))).key)),
+        {name:n,price:"",desc:"",sectionId:"",order:Object.keys(s.items||{}).length});
+      setTimeout(refresh,150);
+    };
+    h.querySelectorAll("tr[data-i]").forEach(tr=>{
+      const iid=tr.dataset.i;
+      tr.querySelectorAll(".se-f").forEach(inp=>inp.onchange=async()=>{ await ensureDraft();
+        update(ref(db,P("items",iid)),{[inp.dataset.f]:inp.value}); });
+      tr.querySelector(".se-rm").onclick=async()=>{ await ensureDraft();
+        await remove(ref(db,P("items",iid))); setTimeout(refresh,150); };
+    });
+    h.querySelector("#se-copy").onclick=async()=>{
+      await ensureDraft();
+      const d=draftOrPub(); const items=obj2arr(d.items).sort(byOrder);
+      if(!items.length) return alert("The weekly menu has no items to copy.");
+      const pick=modal("Copy dishes",`<div style="max-height:50vh;overflow:auto">
+        ${items.map(i=>`<label style="display:block;padding:2px"><input type="checkbox" class="cp" value="${i.id}">
+          ${esc(i.name)} ${esc(money(i.price))}</label>`).join("")}</div>
+        <div class="row" style="margin-top:7px"><button class="b95" id="cp-go">Copy selected</button></div>`);
+      pick.querySelector("#cp-go").onclick=async()=>{
+        const ids=[...pick.querySelectorAll(".cp:checked")].map(x=>x.value);
+        const s=(draftOrPub().specials||{})[date]||{};
+        let n=Object.keys(s.items||{}).length;
+        for(const id of ids){ const it=d.items[id];
+          await set(ref(db,P("items",push(ref(db,P("items"))).key)),
+            {name:it.name,price:it.price||"",desc:it.desc||"",sectionId:"",order:n++}); }
+        pick.remove(); setTimeout(refresh,200);
+      };
+    };
+  };
+  const refresh=()=>{ h.querySelector(".bd").innerHTML=draw(); rewire(); };
+  rewire();
+}
+
+/* ---------- chef: hours ---------- */
+function viewHours(){
+  const r=S.hours?.regular||{}, ex=Object.entries(S.hours?.exceptions||{}).sort((a,b)=>a[0].localeCompare(b[0]));
+  return win("Hours & closures", `
+    <fieldset><legend>Regular week</legend>
+      <table class="sheet95"><tr><th>Day</th><th>Closed</th><th>Open</th><th>Close</th></tr>
+      ${DAYS.map((d,i)=>{const h=r[i]||{};return `<tr data-dow="${i}">
+        <td style="padding:3px 5px">${d}</td>
+        <td style="text-align:center"><input type="checkbox" class="hc" ${h.closed?"checked":""}></td>
+        <td><input type="time" class="ho" value="${esc(h.open||"")}"></td>
+        <td><input type="time" class="hx" value="${esc(h.close||"")}"></td></tr>`;}).join("")}
+      </table></fieldset>
+    <fieldset><legend>Date exceptions</legend>
+      <table class="sheet95"><tr><th>Date</th><th>Closed</th><th>Open</th><th>Close</th><th>Note</th><th></th></tr>
+      ${ex.map(([d,h])=>`<tr data-ex="${d}">
+        <td style="padding:3px 5px">${esc(fmtDate(d))}</td>
+        <td style="text-align:center"><input type="checkbox" class="ec" ${h.closed?"checked":""}></td>
+        <td><input type="time" class="eo" value="${esc(h.open||"")}"></td>
+        <td><input type="time" class="ex2" value="${esc(h.close||"")}"></td>
+        <td><input class="en" value="${esc(h.note||"")}"></td>
+        <td><button class="b95 sm erm">✕</button></td></tr>`).join("")
+        ||'<tr><td colspan="6" style="padding:6px">None.</td></tr>'}
+      </table>
+      <div class="row" style="margin-top:6px"><input type="date" id="ex-date" style="border:2px inset #fff;padding:2px 4px">
+        <button class="b95" id="ex-add">Add exception</button>
+        <span class="hint">Hours publish immediately — they aren't part of the menu draft.</span></div>
+    </fieldset>`);
+}
+wireUp.hours=()=>{
+  document.querySelectorAll("tr[data-dow]").forEach(tr=>{
+    const i=tr.dataset.dow, w=()=>update(ref(db,"hours/regular/"+i),{
+      closed:tr.querySelector(".hc").checked, open:tr.querySelector(".ho").value, close:tr.querySelector(".hx").value});
+    tr.querySelectorAll("input").forEach(x=>x.onchange=w);
+  });
+  $("#ex-add").onclick=()=>{ const d=$("#ex-date").value; if(!d) return;
+    set(ref(db,"hours/exceptions/"+d),{closed:false,open:"",close:"",note:""}); };
+  document.querySelectorAll("tr[data-ex]").forEach(tr=>{
+    const d=tr.dataset.ex, w=()=>update(ref(db,"hours/exceptions/"+d),{
+      closed:tr.querySelector(".ec").checked, open:tr.querySelector(".eo").value,
+      close:tr.querySelector(".ex2").value, note:tr.querySelector(".en").value});
+    tr.querySelectorAll("input").forEach(x=>x.onchange=w);
+    tr.querySelector(".erm").onclick=()=>remove(ref(db,"hours/exceptions/"+d));
+  });
+};
+
+/* ---------- go ---------- */
+show("screen-auth");
+</script>
+</body>
+</html>
